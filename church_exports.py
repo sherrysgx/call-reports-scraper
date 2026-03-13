@@ -1,8 +1,11 @@
 """
 Per-congregation pastor call export utilities.
 
-Can also be run directly to re-export from an existing wels_calls.json:
-    python church_exports.py [output_dir]
+Can also be run directly to re-export from an existing pastor_calls.json:
+    python church_exports.py [data_dir]
+
+Reads data from data_dir/pastor_calls.json (default: data/)
+Saves exports to output/
 """
 
 import json
@@ -29,6 +32,14 @@ def _export_church(
         logger.warning(f"No data available for {destination_label} export")
         return None
 
+    def parse_report_date(s):
+        for fmt in ('%B %d, %Y', '%B %d,%Y'):
+            try:
+                return datetime.strptime(s, fmt)
+            except (ValueError, TypeError):
+                pass
+        return datetime.min
+
     pastors_by_name = defaultdict(list)
 
     for call in all_calls:
@@ -42,7 +53,8 @@ def _export_church(
                 "call_status": call.get('call_status', ''),
                 "from_congregation": call.get('current_call', '').strip(),
                 "to_congregation": new_call,
-                "effective_date": call.get('date_effective', '').strip()
+                "effective_date": call.get('date_effective', '').strip(),
+                "report_date": call.get('report_date', '').strip(),
             })
 
     deduped = []
@@ -51,8 +63,11 @@ def _export_church(
         resolved = [c for c in calls if c['call_status'] in ('accepted', 'returned')]
         if not resolved:
             resolved = calls
-        calls_sorted = sorted(resolved, key=lambda x: x['effective_date'], reverse=True)
-        deduped.append(calls_sorted[0])
+        # Sort by report_date descending so we get the most recent status
+        calls_sorted = sorted(resolved, key=lambda x: parse_report_date(x['report_date']), reverse=True)
+        best = calls_sorted[0].copy()
+        best.pop('report_date', None)  # don't include report_date in the output record
+        deduped.append(best)
 
     deduped.sort(
         key=lambda x: datetime.strptime(x['effective_date'], '%m/%d/%Y') if x['effective_date'] else datetime.min,
@@ -124,8 +139,8 @@ def export_crown_of_life_west_saint_paul(all_calls: List[Dict], output_dir: Path
 
 
 def main():
-    output_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("output")
-    data_file = output_dir / "wels_calls.json"
+    data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("data")
+    data_file = data_dir / "pastor_calls.json"
 
     if not data_file.exists():
         logger.error(f"Data file not found: {data_file}")
@@ -136,6 +151,9 @@ def main():
         all_calls = json.load(f)
 
     logger.info(f"Loaded {len(all_calls)} calls from {data_file}")
+
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
 
     export_living_hope_madison(all_calls, output_dir)
     export_apostles_san_jose(all_calls, output_dir)
