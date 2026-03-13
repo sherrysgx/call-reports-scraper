@@ -40,3 +40,4 @@ wheels/
 
 # Output files (optional - uncomment if you don't want to commit these)
 output/
+data/

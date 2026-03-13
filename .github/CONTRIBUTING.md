@@ -6,7 +6,7 @@ Thank you for your interest in contributing!
 
 - Use the issue tracker to report bugs
 - Include steps to reproduce, error messages or logs, and your OS and Python version
-- Note whether you are running with `--selenium` and your Chrome version
+- Include your Chrome version
 
 ## Suggesting Enhancements
 
@@ -33,7 +33,7 @@ Thank you for your interest in contributing!
 - Follow the existing code style (PEP 8, f-strings, type hints on function signatures)
 - Adding a new congregation export? Follow the pattern in `church_exports.py` — add a function using `_export_church()` and register it in `main()`
 - Keep docstrings short and factual
-- Do not commit files from `output/` — they contain scraped data and are gitignored
+- Do not commit files from `data/` or `output/` — they contain scraped data and are gitignored
 
 ## Questions
 

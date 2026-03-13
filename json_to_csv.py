@@ -26,15 +26,17 @@ def json_to_csv(json_path: str, csv_path: str = None):
     with open(json_path, encoding='utf-8') as f:
         data = json.load(f)
 
+    destination = data.get('destination', '') if isinstance(data, dict) else ''
     records = data if isinstance(data, list) else data.get('pastors', [])
     if not records:
         print(f"No records found in {json_path}")
         return
 
     with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=['person_name', 'call_status', 'current_call', 'new_call', 'date_effective', 'report_date'], extrasaction='ignore')
+        writer = csv.DictWriter(f, fieldnames=['church', 'person_name', 'call_status', 'current_call', 'new_call', 'date_effective', 'report_date'], extrasaction='ignore')
         writer.writeheader()
-        writer.writerows([normalize(r) for r in records])
+        rows = [{'church': destination, **normalize(r)} for r in records]
+        writer.writerows(rows)
 
     print(f"Wrote {len(records)} rows to {csv_path}")
 
@@ -46,10 +48,12 @@ def json_to_text(json_path: str, txt_path: str = None):
     with open(json_path, encoding='utf-8') as f:
         data = json.load(f)
 
+    destination = data.get('destination', '') if isinstance(data, dict) else ''
     records = data if isinstance(data, list) else data.get('pastors', [])
 
+    title = f"Pastors Called to {destination}" if destination else "Call Report"
     lines = [
-        f"Call Report",
+        title,
         f"({len(records)} total)",
         "",
     ]

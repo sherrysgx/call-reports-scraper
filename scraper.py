@@ -6,23 +6,14 @@ Uses Selenium for JavaScript-rendered Blazor content
 """
 
 import requests
-import csv
 import json
 import logging
 import time
 import sys
-from datetime import datetime, timezone
 from typing import List, Dict, Optional, Set
 from bs4 import BeautifulSoup
 from pathlib import Path
 import re
-
-from church_exports import (
-    export_living_hope_madison,
-    export_apostles_san_jose,
-    export_crossroads_chicago,
-    export_good_shepherd_omaha,
-)
 
 try:
     from selenium import webdriver
@@ -50,7 +41,7 @@ class PastorCallScraper:
     ARCHIVE_URL = f"{BASE_URL}/Archive"
     DELAY_SECONDS = 1
     
-    def __init__(self, output_dir: str = "output", use_selenium: bool = False):
+    def __init__(self, output_dir: str = "data", use_selenium: bool = False):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         self.all_calls = []
@@ -66,31 +57,37 @@ class PastorCallScraper:
         })
         self.driver = None
     
-    def load_scraped_ids(self) -> Set[str]:
-        """Load set of already-scraped report IDs from tracking file"""
-        tracking_file = self.output_dir / "scraped_ids.json"
-        if not tracking_file.exists():
-            logger.info("No tracking file found — first run, all reports will be scraped")
+    def save_report_list(self, reports: List[Dict[str, str]], filename: str = "report_list.json") -> tuple:
+        """Merge new reports into the existing report list file, deduplicating by id."""
+        filepath = self.output_dir / filename
+        existing = []
+        if filepath.exists():
+            try:
+                with open(filepath, encoding='utf-8') as f:
+                    existing = json.load(f)
+            except Exception as e:
+                logger.error(f"Could not read {filename} ({e}) — starting fresh")
+
+        existing_ids = {r['id'] for r in existing}
+        new_entries = [r for r in reports if r['id'] not in existing_ids]
+        merged = existing + new_entries
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(merged, f, indent=2, ensure_ascii=False)
+        logger.info(f"Saved {len(merged)} reports to {filepath} ({len(new_entries)} new)")
+        return filepath, len(new_entries), len(merged)
+
+    def load_existing_dates(self) -> Set[str]:
+        """Get report_date strings already in pastor_calls.json to avoid re-scraping."""
+        filepath = self.output_dir / "pastor_calls.json"
+        if not filepath.exists():
             return set()
         try:
-            with open(tracking_file, encoding='utf-8') as f:
+            with open(filepath, encoding='utf-8') as f:
                 data = json.load(f)
-            return set(data.get("scraped_ids", []))
+            return {r.get('report_date', '') for r in data if r.get('report_date')}
         except Exception as e:
-            logger.error(f"Could not read scraped_ids.json ({e}) — will re-scrape all")
+            logger.error(f"Could not read pastor_calls.json ({e}) — will re-scrape all")
             return set()
-
-    def save_scraped_ids(self, ids: Set[str]) -> None:
-        """Persist the set of scraped report IDs to tracking file"""
-        tracking_file = self.output_dir / "scraped_ids.json"
-        data = {
-            "scraped_ids": sorted(ids),
-            "last_run": datetime.now(timezone.utc).isoformat(),
-            "total_records": len(self.all_calls),
-        }
-        with open(tracking_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
-        logger.info(f"Saved {len(ids)} scraped IDs to {tracking_file}")
 
     def get_driver(self):
         """Initialize Selenium WebDriver"""
@@ -274,41 +271,35 @@ class PastorCallScraper:
         
         return calls
     
-    def scrape_all_reports(self, limit: Optional[int] = None) -> Set[str]:
-        """Scrape only new call reports not yet in the tracking file.
-        Returns the set of report IDs successfully scraped this run."""
-        reports = self.get_report_list()
-
+    def scrape_all_reports(self, reports: List[Dict[str, str]], limit: Optional[int] = None) -> None:
+        """Scrape only new call reports not yet in pastor_calls.json."""
         if not reports:
             logger.error("No reports found!")
-            return set()
+            return
 
-        existing_ids = self.load_scraped_ids()
-        new_reports = [r for r in reports if r['id'] not in existing_ids]
+        existing_dates = self.load_existing_dates()
+        new_reports = [r for r in reports if r['date'] not in existing_dates]
 
         logger.info(
-            f"Archive: {len(reports)} total, {len(existing_ids)} already scraped, "
+            f"Archive: {len(reports)} total, {len(existing_dates)} dates already in data, "
             f"{len(new_reports)} new to scrape"
         )
 
         if not new_reports:
             logger.info("Nothing new to scrape.")
-            return set()
+            return
 
         if limit:
             new_reports = new_reports[:limit]
             logger.info(f"Limited to {limit} new reports")
 
-        newly_scraped_ids: Set[str] = set()
-
         for idx, report in enumerate(new_reports, 1):
             logger.info(f"Processing report {idx}/{len(new_reports)}: {report['date']}")
 
-            html = self.fetch_page(report['url'])
+            html = self.fetch_with_selenium(report['url'])
             if html:
                 calls = self.parse_call_data(html, report['date'])
                 self.all_calls.extend(calls)
-                newly_scraped_ids.add(report['id'])
                 logger.info(f"Extracted {len(calls)} rows from {report['date']}")
             else:
                 logger.warning(f"Failed to fetch {report['date']} — will retry next run")
@@ -317,9 +308,8 @@ class PastorCallScraper:
                 time.sleep(self.DELAY_SECONDS)
 
         logger.info(f"New rows extracted this run: {len(self.all_calls)}")
-        return newly_scraped_ids
     
-    def save_json(self, filename: str = "wels_calls.json") -> Path:
+    def save_json(self, filename: str = "pastor_calls.json") -> tuple:
         """Merge new calls with existing JSON file and rewrite."""
         filepath = self.output_dir / filename
         existing_calls = []
@@ -335,65 +325,37 @@ class PastorCallScraper:
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(merged, f, indent=2, ensure_ascii=False)
         logger.info(f"Saved {len(merged)} total records to {filepath} ({len(self.all_calls)} new)")
-        return filepath
+        return filepath, len(self.all_calls), len(merged)
 
-    def save_csv(self, filename: str = "wels_calls.csv") -> Optional[Path]:
-        """Append new calls to existing CSV, or create it on first run."""
-        if not self.all_calls:
-            logger.warning("No new data to append to CSV")
-            return None
-
-        fieldnames = ['report_date', 'call_status', 'person_name', 'current_call', 'new_call', 'date_effective']
-        filepath = self.output_dir / filename
-
-        try:
-            if filepath.exists():
-                with open(filepath, 'a', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-                    writer.writerows(self.all_calls)
-                logger.info(f"Appended {len(self.all_calls)} rows to {filepath}")
-            else:
-                with open(filepath, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
-                    writer.writeheader()
-                    writer.writerows(self.all_calls)
-                logger.info(f"Created {filepath} with {len(self.all_calls)} rows")
-            return filepath
-        except Exception as e:
-            logger.error(f"Failed to save CSV: {e}")
-            return None
-    
-    def print_summary(self):
-        """Print summary statistics"""
-        if not self.all_calls:
-            print("No data collected")
-            if not self.use_selenium:
-                print("\nTip: Try with Selenium to render JavaScript:")
-                print("  python scraper.py --selenium")
-            return
-        
+    def print_summary(self, report_list_stats: tuple = None, call_stats: tuple = None):
+        """Print summary of what was appended this run."""
         print("\n" + "="*70)
-        print("WELS PASTOR CALL REPORT SUMMARY")
+        print("WELS PASTOR CALL REPORT — RUN SUMMARY")
         print("="*70)
-        print(f"Total data rows extracted: {len(self.all_calls)}")
-        
-        # Group by report date
-        by_date = {}
-        for call in self.all_calls:
-            date = call.get('report_date', 'Unknown')
-            by_date[date] = by_date.get(date, 0) + 1
-        
-        print(f"\nRows by Report Date:")
-        for date, count in sorted(by_date.items(), reverse=True)[:15]:
-            print(f"  {date}: {count} rows")
-        
-        # Show sample data
+
+        if report_list_stats:
+            _, new_reports, total_reports = report_list_stats
+            print(f"  Report list:   +{new_reports} new  (total: {total_reports})  → {self.output_dir}/report_list.json")
+
+        if call_stats:
+            _, new_calls, total_calls = call_stats
+            print(f"  Call records:  +{new_calls} new  (total: {total_calls})  → {self.output_dir}/pastor_calls.json")
+        elif not self.all_calls:
+            print("  Call records:  nothing new to append")
+
         if self.all_calls:
-            print(f"\nSample row:")
-            sample = self.all_calls[0]
-            for key, value in list(sample.items())[:5]:
-                print(f"  {key}: {value[:80] if isinstance(value, str) else value}")
-        
+            by_date = {}
+            for call in self.all_calls:
+                date = call.get('report_date', 'Unknown')
+                by_date[date] = by_date.get(date, 0) + 1
+            print(f"\n  New records by report date:")
+            for date, count in sorted(by_date.items(), reverse=True)[:15]:
+                print(f"    {date}: {count} rows")
+
+        if not self.use_selenium and not self.all_calls and not report_list_stats:
+            print("\n  Tip: Run with --selenium to render JavaScript content:")
+            print("    python scraper.py --selenium")
+
         print("="*70 + "\n")
     
     def cleanup(self):
@@ -426,21 +388,16 @@ def main():
     scraper = PastorCallScraper(use_selenium=use_selenium)
     try:
         logger.info("Starting WELS Pastor Call Report Scraper")
-        newly_scraped_ids = scraper.scrape_all_reports(limit=limit)
+        reports = scraper.get_report_list()
+        report_list_stats = None
+        if reports:
+            report_list_stats = scraper.save_report_list(reports)
+        scraper.scrape_all_reports(reports, limit=limit)
 
+        call_stats = None
         if scraper.all_calls:
-            scraper.save_json()
-            scraper.save_csv()
-            export_living_hope_madison(scraper.all_calls, scraper.output_dir)
-            export_apostles_san_jose(scraper.all_calls, scraper.output_dir)
-            export_crossroads_chicago(scraper.all_calls, scraper.output_dir)
-            export_good_shepherd_omaha(scraper.all_calls, scraper.output_dir)
-            scraper.print_summary()
-
-        # Persist scraped IDs only after data files are safely written
-        if newly_scraped_ids:
-            existing_ids = scraper.load_scraped_ids()
-            scraper.save_scraped_ids(existing_ids | newly_scraped_ids)
+            call_stats = scraper.save_json()
+        scraper.print_summary(report_list_stats=report_list_stats, call_stats=call_stats)
 
     except KeyboardInterrupt:
         logger.info("Scraping interrupted by user")
